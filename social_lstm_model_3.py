@@ -252,8 +252,7 @@ def save_checkpoint(model, optimizer):
     }
     torch.save(checkpoint, 'checkpoint.pt')
 
-def train(model, train_data, val_data, test_data, optimizer, 
-        epochs=10, log_every=100):
+def train(rank, model, train_data, val_data, test_data, optimizer, epochs = 2, log_every = 100):
     ema_loss = None
     criterion = nn.BCEWithLogitsLoss()
     best_iter = (0., 0,0)
@@ -264,8 +263,15 @@ def train(model, train_data, val_data, test_data, optimizer,
         for i, batch in enumerate(train_data):
             _, text, users, subs, lengths, metafeats, labels = batch
             text, users, subs, metafeats, labels = Variable(text), Variable(users), Variable(subs), Variable(metafeats), Variable(labels)
+            # if os.path.isfile('checkpoint.pt'):
+            #     checkpoint = torch.load('checkpoint.pt')
+            #     model.load_state_dict(checkpoint['model'])
+            #     optimizer.load_state_dict(checkpoint['optimizer'])
             optimizer.zero_grad()
-            outputs = model(text, users, subs, metafeats, lengths).cuda()
+            if constants.CUDA:
+                outputs = model(text, users, subs, metafeats, lengths).cuda()
+            else :
+                outputs = model(text, users, subs, metafeats, lengths)
             loss = criterion(outputs.squeeze(), labels)
             optimizer.step()
 
@@ -285,8 +291,8 @@ def train(model, train_data, val_data, test_data, optimizer,
                     best_test = evaluate_auc(model, test_data)
                     if auc > 0.7:
                         ids, embeds = get_embeddings(train_data+val_data+test_data)
-            save_checkpoint(model, optimizer)
     print(("Overall best val:", best_iter))
+    # save_checkpoint(model, optimizer)
     mp.Event().wait
     return best_iter[0]
 
@@ -348,7 +354,7 @@ if __name__ == "__main__":
     # print(torch.cuda.device_count())
     # sys.exit()
     start_time = time.time()
-    mp.set_start_method('spawn')
+    # mp.set_start_method('fork')
     print("Loading training data")
     # WE HAVE PRE-CONSTRUCTED TRAIN/VAL/TEST DATA USING load_data
     # this avoids re-doing all the pre-processing everytime the code is
@@ -356,9 +362,8 @@ if __name__ == "__main__":
     train_data = pickle.load(open(constants.TRAIN_DATA, 'rb'))
     val_data = pickle.load(open(constants.VAL_DATA, 'rb'))
     test_data = pickle.load(open(constants.TEST_DATA, 'rb'))
-
-    print((len(train_data)*constants.BATCH_SIZE, "training examples", len(val_data)*512, "validation examples"))
-    print((sum([i for batch in train_data for i in batch[-1]]), "positive training", sum([i for batch in val_data for i in batch[-1]]), "positive validation"))
+    # print((len(train_data)*constants.BATCH_SIZE, "training examples", len(val_data)*512, "validation examples"))
+    # print((sum([i for batch in train_data for i in batch[-1]]), "positive training", sum([i for batch in val_data for i in batch[-1]]), "positive validation"))
     # annoying checks for CUDA switches....
     if constants.CUDA:
         for i in range(len(train_data)):
@@ -393,6 +398,39 @@ if __name__ == "__main__":
                     batch[4],
                     metafeats.cuda(),
                     batch[6].cuda())
+    else :
+        for i in range(len(train_data)):
+            batch = train_data[i]
+            metafeats = batch[5]
+            train_data[i] = (batch[0], 
+                    batch[1],
+                    batch[2],
+                    batch[3],
+                    batch[4],
+                    metafeats,
+                    batch[6])
+
+        for i in range(len(val_data)):
+            batch = val_data[i]
+            metafeats = batch[5]
+            val_data[i] = (batch[0], 
+                    batch[1],
+                    batch[2],
+                    batch[3],
+                    batch[4],
+                    metafeats,
+                    batch[6])
+
+        for i in range(len(test_data)):
+            batch = test_data[i]
+            metafeats = batch[5]
+            test_data[i] = (batch[0], 
+                    batch[1],
+                    batch[2],
+                    batch[3],
+                    batch[4],
+                    metafeats,
+                    batch[6])
 
     best_auc = (0,"") 
     model = SocialLSTM(args.hidden_dim, prepend_social=prepend_social, dropout=args.dropout, include_embeds=args.final_layer_social, 
@@ -403,15 +441,16 @@ if __name__ == "__main__":
 
     model.share_memory()
     optimizer = torch.optim.Adam(filter(lambda p : p.requires_grad, model.parameters()), lr=args.learning_rate)
-    n = 2
-    process = []
-    for i in range(n):
-        p = mp.Process(target=train, args=(model, train_data, val_data, test_data, optimizer, 2))
-        p.start()
-        process.append(p)
+    mp.spawn(train ,args=(model, train_data, val_data, test_data, optimizer, 4, 100), nprocs=2)
+    # n = 2
+    # process = []
+    # for i in range(n):
+    #     p = mp.Process(target=train, args=(model, train_data, val_data, test_data, optimizer, 2))
+    #     p.start()
+    #     process.append(p)
 
-    for p in process:
-        p.join()
+    # for p in process:
+    #     p.join()
 
     print ("Time: %s seconds" %(time.time() - start_time))
     # auc = train(model, train_data, val_data, test_data, optimizer, epochs=10)
